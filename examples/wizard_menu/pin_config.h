@@ -1,7 +1,15 @@
 #pragma once
 
-#define WIFI_SSID                    "Your-ssid"
-#define WIFI_PASSWORD                "Your-passworld"
+// Default Wi-Fi credentials from file (used only if there is no saved Wi-Fi in NVS).
+// Leave empty strings if you do not want hardcoded defaults.
+#define WIFI_DEFAULT_SSID            ""
+#define WIFI_DEFAULT_PASSWORD        ""
+#define WIFI_DEFAULT_AUTO_CONNECT    1
+
+// Optional weather location for Web screen (Open-Meteo)
+#define WEATHER_LAT                  56.8389
+#define WEATHER_LON                  60.6057
+#define WEATHER_LABEL                "Yekaterinburg"
 
 /* ESP32S3 */
 #define PIN_LCD_BL                   38
