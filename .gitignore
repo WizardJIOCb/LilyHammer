@@ -9,6 +9,7 @@ example/arduino/CST328touch
 *.obj
 *.elf
 .pio
+.pio-core/
 # Linker output
 *.ilk
 *.map
