@@ -55,3 +55,8 @@ Mkfile.old
 dkms.conf
 build
 script
+
+# Local secrets
+.env
+platformio.local.ini
+

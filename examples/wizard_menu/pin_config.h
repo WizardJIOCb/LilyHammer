@@ -1,15 +1,24 @@
-#pragma once
+﻿#pragma once
 
 // Default Wi-Fi credentials from file (used only if there is no saved Wi-Fi in NVS).
+// IMPORTANT: ESP32-S3 supports only 2.4 GHz Wi-Fi networks.
+// A 5 GHz SSID will not connect.
 // Leave empty strings if you do not want hardcoded defaults.
-#define WIFI_DEFAULT_SSID            ""
-#define WIFI_DEFAULT_PASSWORD        ""
+#define WIFI_DEFAULT_SSID            "TP-Link_2AB4"
+#define WIFI_DEFAULT_PASSWORD        "9666280519616669"
 #define WIFI_DEFAULT_AUTO_CONNECT    1
 
 // Optional weather location for Web screen (Open-Meteo)
-#define WEATHER_LAT                  56.8389
-#define WEATHER_LON                  60.6057
-#define WEATHER_LABEL                "Yekaterinburg"
+#define WEATHER_LAT                  54.4815
+#define WEATHER_LON                  53.4710
+#define WEATHER_LABEL                "Oktyabrsky, Bashkortostan"
+// GitHub settings for Web screen.
+// Optional: set token to improve rate limits and data quality.
+// Keep empty string to use unauthenticated mode/fallback sources.
+#define GITHUB_USERNAME              "WizardJIOCb"
+#ifndef GITHUB_TOKEN
+#define GITHUB_TOKEN                 ""
+#endif
 
 /* ESP32S3 */
 #define PIN_LCD_BL                   38
@@ -40,3 +49,10 @@
 
 #define PIN_TOUCH_INT                16
 #define PIN_TOUCH_RES                21
+
+
+
+
+
+
+

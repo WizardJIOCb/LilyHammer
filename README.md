@@ -15,6 +15,7 @@ Main menu cards (infinite loop swipe):
 - WiFi manager
 - Bluetooth manager
 - Web (Weather + GitHub stats)
+- Projects (recent commits feed)
 - Settings
 - Activity monitor
 - Fun (full-screen GIF)
@@ -63,23 +64,18 @@ Key settings:
 ### GitHub
 
 - Username via `GITHUB_USERNAME`
-- Optional token via `GITHUB_TOKEN` (better rate limits)
+- Optional token via local `.env` (`PLATFORMIO_GITHUB_TOKEN`) for better rate limits
 - Shows yearly public contribution heatmap
 
-## Bluetooth Screen
+## Local Secrets
 
-- BLE scan
-- Device list with RSSI
-- Details popup on tap
-- Vendor/name inference from advertising data when possible
+Use local `.env` (not committed):
 
-Note: many BLE devices intentionally hide full names; in such cases only partial metadata is available.
+```powershell
+PLATFORMIO_GITHUB_TOKEN=ghp_xxx
+```
 
-## GIF Screens
-
-- `Fun` loads `/images/this-is-fine.gif`
-- `Homer` loads `/images/homer.gif`
-- Files are stored in LittleFS (`data/images/...`)
+`scripts/load_env.py` injects this token into build define `GITHUB_TOKEN` at compile time.
 
 ## Build And Flash (PlatformIO)
 
@@ -125,7 +121,7 @@ It rebuilds and uploads firmware for quick iteration.
 
 ## Core Files
 
-- Firmware entry: `examples/wizard_menu/wizard_menu.ino`
+- Firmware entry: `examples/wizard_menu/wizard_menu.cpp`
 - Board/project config: `platformio.ini`
 - Runtime config: `examples/wizard_menu/pin_config.h`
 
