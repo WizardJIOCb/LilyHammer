@@ -360,6 +360,7 @@ bool projectsHydrateActive = false;
 uint8_t projectsHydrateCursor = 0;
 uint8_t projectsHydrateTotal = 0;
 uint8_t projectsHydrateDone = 0;
+bool projectsFetchPending = false;
 
 // News feed
 enum class NewsFilter : uint8_t { All, VC, DTF };
@@ -371,6 +372,9 @@ uint8_t newsDetailIndex = 0;
 int16_t newsDetailScroll = 0;
 String newsDetailTitle = "";
 String newsDetailBody = "";
+bool newsFetchPending = false;
+
+uint32_t lastFeedsLoadingUiMs = 0;
 
 // Settings
 int backlightValue = 255;
@@ -1415,7 +1419,10 @@ void drawMenuScreen() {
   tft.drawRoundRect(kMenuCardX, kMenuCardY, kMenuCardW, kMenuCardH, 12, kColorMenuCardBorder);
   tft.setTextColor(kColorMenuItemText, kColorMenuCardBg);
   tft.drawCentreString(menuTitleByIndex(selectedMenuIndex), kScreenW / 2, 44, 4);
-  if (appByMenuIndex(selectedMenuIndex) == AppId::Projects && (projectsState.loading || projectsHydrateActive)) {
+  AppId selApp = appByMenuIndex(selectedMenuIndex);
+  bool projectsBusy = (selApp == AppId::Projects) && (projectsState.loading || projectsHydrateActive || projectsFetchPending);
+  bool newsBusy = (selApp == AppId::News) && (newsState.loading || newsFetchPending);
+  if (projectsBusy || newsBusy) {
     tft.setTextColor(TFT_WHITE, kColorMenuCardBg);
     tft.drawCentreString("Loading...", kScreenW / 2, 82, 2);
   }
@@ -1432,7 +1439,9 @@ void drawMenuCardItemAt(int16_t cx, const char *label) {
   tft.drawRoundRect(x, kMenuCardY, kMenuCardW, kMenuCardH, 12, kColorMenuCardBorder);
   tft.setTextColor(kColorMenuItemText, kColorMenuCardBg);
   tft.drawCentreString(label, cx, 44, 4);
-  if (strcmp(label, "Projects") == 0 && (projectsState.loading || projectsHydrateActive)) {
+  bool projectsBusy = (strcmp(label, "Projects") == 0) && (projectsState.loading || projectsHydrateActive || projectsFetchPending);
+  bool newsBusy = (strcmp(label, "News") == 0) && (newsState.loading || newsFetchPending);
+  if (projectsBusy || newsBusy) {
     tft.setTextColor(TFT_WHITE, kColorMenuCardBg);
     tft.drawCentreString("Loading...", cx, 82, 2);
   }
@@ -1444,7 +1453,9 @@ void drawMenuCardItemInSprite(TFT_eSprite &spr, int16_t cx, const char *label) {
   spr.drawRoundRect(x, 0, kMenuCardW, kMenuCardH, 12, kColorMenuCardBorder);
   spr.setTextColor(kColorMenuItemText, kColorMenuCardBg);
   spr.drawCentreString(label, cx, 28, 4);
-  if (strcmp(label, "Projects") == 0 && (projectsState.loading || projectsHydrateActive)) {
+  bool projectsBusy = (strcmp(label, "Projects") == 0) && (projectsState.loading || projectsHydrateActive || projectsFetchPending);
+  bool newsBusy = (strcmp(label, "News") == 0) && (newsState.loading || newsFetchPending);
+  if (projectsBusy || newsBusy) {
     spr.setTextColor(TFT_WHITE, kColorMenuCardBg);
     spr.drawCentreString("Loading...", cx, 56, 2);
   }
@@ -3078,25 +3089,37 @@ void handleNewsTap(int16_t x, int16_t y) {
 
   if (inRect(x, y, 10, 10, 56, 22)) {
     newsFilter = NewsFilter::All;
-    fetchNewsFeed();
+    newsState.loading = true;
+    newsState.loadingDots = 0;
+    newsState.status = "Loading news...";
+    newsFetchPending = true;
     needFullRedraw = true;
     return;
   }
   if (inRect(x, y, 70, 10, 56, 22)) {
     newsFilter = NewsFilter::VC;
-    fetchNewsFeed();
+    newsState.loading = true;
+    newsState.loadingDots = 0;
+    newsState.status = "Loading news...";
+    newsFetchPending = true;
     needFullRedraw = true;
     return;
   }
   if (inRect(x, y, 130, 10, 56, 22)) {
     newsFilter = NewsFilter::DTF;
-    fetchNewsFeed();
+    newsState.loading = true;
+    newsState.loadingDots = 0;
+    newsState.status = "Loading news...";
+    newsFetchPending = true;
     needFullRedraw = true;
     return;
   }
   if (inRect(x, y, 190, 10, 120, 22)) {
-    if (!newsState.loading) {
-      fetchNewsFeed();
+    if (!newsState.loading && !newsFetchPending) {
+      newsState.loading = true;
+      newsState.loadingDots = 0;
+      newsState.status = "Loading news...";
+      newsFetchPending = true;
       needFullRedraw = true;
     }
     return;
@@ -3503,11 +3526,17 @@ void openSelectedMenu() {
     default: currentScreen = Screen::Menu; break;
   }
 
-  if (currentScreen == Screen::Projects && projectsState.count == 0 && !projectsState.loading) {
-    fetchProjectsFeed();
+  if (currentScreen == Screen::Projects && projectsState.count == 0 && !projectsState.loading && !projectsFetchPending) {
+    projectsState.loading = true;
+    projectsState.loadingDots = 0;
+    projectsState.status = "Loading commits...";
+    projectsFetchPending = true;
   }
-  if (currentScreen == Screen::News && newsState.count == 0 && !newsState.loading) {
-    fetchNewsFeed();
+  if (currentScreen == Screen::News && newsState.count == 0 && !newsState.loading && !newsFetchPending) {
+    newsState.loading = true;
+    newsState.loadingDots = 0;
+    newsState.status = "Loading news...";
+    newsFetchPending = true;
   }
 
   needFullRedraw = true;
@@ -3692,9 +3721,11 @@ void handleSettingsTap(int16_t x, int16_t y) {
 
 void handleProjectsTap(int16_t x, int16_t y) {
   if (inRect(x, y, 10, 10, 96, 24)) {
-    if (projectsState.loading || projectsHydrateActive) return;
-    drawProjectsScreen(false);
-    fetchProjectsFeed();
+    if (projectsState.loading || projectsHydrateActive || projectsFetchPending) return;
+    projectsState.loading = true;
+    projectsState.loadingDots = 0;
+    projectsState.status = "Loading commits...";
+    projectsFetchPending = true;
     needFullRedraw = true;
     return;
   }
@@ -4128,6 +4159,22 @@ void loop() {
   handlePhysicalButtons();
   processTouch();
 
+  if (millis() - lastFeedsLoadingUiMs >= 320) {
+    bool dirty = false;
+    if (projectsState.loading || projectsHydrateActive || projectsFetchPending) {
+      projectsState.loadingDots = (projectsState.loadingDots + 1) % 3;
+      dirty = true;
+    }
+    if (newsState.loading || newsFetchPending) {
+      newsState.loadingDots = (newsState.loadingDots + 1) % 3;
+      dirty = true;
+    }
+    if (dirty && (currentScreen == Screen::Menu || currentScreen == Screen::Projects || currentScreen == Screen::News)) {
+      needFullRedraw = true;
+    }
+    lastFeedsLoadingUiMs = millis();
+  }
+
   // Safety net: menu must always be in landscape orientation.
   if (currentScreen == Screen::Menu && tft.getRotation() != 3) {
     tft.setRotation(3);
@@ -4146,6 +4193,17 @@ void loop() {
     if (wifiConnecting) wifiUiDots = (wifiUiDots + 1) % 3;
     drawWiFiStatusLine();
     lastWiFiUiTickMs = millis();
+  }
+
+  if (projectsFetchPending && currentScreen == Screen::Projects) {
+    projectsFetchPending = false;
+    fetchProjectsFeed();
+    needFullRedraw = true;
+  }
+  if (newsFetchPending && currentScreen == Screen::News) {
+    newsFetchPending = false;
+    fetchNewsFeed();
+    needFullRedraw = true;
   }
 
   delay(5);
@@ -4169,6 +4227,20 @@ void loop() {
     320 != TFT_HEIGHT
 #error "Please select Setup206_LilyGo_T_Display_S3.h in TFT_eSPI/User_Setup_Select.h"
 #endif
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
