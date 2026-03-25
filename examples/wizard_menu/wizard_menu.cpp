@@ -13,6 +13,7 @@
 #include "BLEDevice.h"
 #include "LittleFS.h"
 #include "AnimatedGIF.h"
+#include <U8g2_for_TFT_eSPI.h>
 #include "pin_config.h"
 #include "apps/AppVersion.h"
 #include "apps/AppRegistry.h"
@@ -30,6 +31,7 @@ TouchLib touch(Wire, PIN_IIC_SDA, PIN_IIC_SCL, CTS820_SLAVE_ADDRESS, PIN_TOUCH_R
 #endif
 
 TFT_eSPI tft = TFT_eSPI();
+U8g2_for_TFT_eSPI u8f;
 Preferences prefs;
 
 constexpr int16_t kScreenW = 320;
@@ -2890,40 +2892,70 @@ void newsScrollBy(int8_t delta) {
   }
 }
 
+static void utf8PopBack(String &s) {
+  if (s.length() == 0) return;
+  int i = s.length() - 1;
+  while (i > 0 && (((uint8_t)s[i] & 0xC0) == 0x80)) i--;
+  s.remove(i);
+}
+
+static String newsEllipsizeUtf8(const String &src, int16_t maxWidthPx) {
+  String out = src;
+  if (u8f.getUTF8Width(out.c_str()) <= maxWidthPx) return out;
+  String dots = "...";
+  while (out.length() > 0 && u8f.getUTF8Width((out + dots).c_str()) > maxWidthPx) {
+    utf8PopBack(out);
+  }
+  return out + dots;
+}
 void drawNewsWrappedText(const String &text, int16_t x, int16_t y, int16_t w, int16_t h, int16_t yOffset, uint16_t color) {
-  const uint8_t charsPerLine = max<int16_t>(18, w / 6);
+  u8f.setFont(u8g2_font_6x13_t_cyrillic);
+  u8f.setForegroundColor(color);
+  u8f.setBackgroundColor(TFT_BLACK);
+
+  int16_t lineH = 10;
   int16_t cy = y - yOffset;
-  int idx = 0;
-  tft.setTextColor(color, TFT_BLACK);
+  int pos = 0;
 
-  while (idx < (int)text.length()) {
-    int nl = text.indexOf('\n', idx);
-    String chunk;
-    if (nl < 0) {
-      chunk = text.substring(idx);
-      idx = text.length();
+  while (pos <= (int)text.length()) {
+    int nl = text.indexOf('\n', pos);
+    if (nl < 0) nl = text.length();
+    String paragraph = text.substring(pos, nl);
+    paragraph.trim();
+
+    if (paragraph.length() == 0) {
+      cy += lineH;
     } else {
-      chunk = text.substring(idx, nl);
-      idx = nl + 1;
-    }
+      String line = "";
+      int wordPos = 0;
+      while (wordPos < (int)paragraph.length()) {
+        int sp = paragraph.indexOf(' ', wordPos);
+        if (sp < 0) sp = paragraph.length();
+        String word = paragraph.substring(wordPos, sp);
 
-    while (chunk.length() > 0) {
-      int take = min((int)charsPerLine, (int)chunk.length());
-      if (take < (int)chunk.length()) {
-        int lastSpace = chunk.lastIndexOf(' ', take - 1);
-        if (lastSpace > charsPerLine / 2) take = lastSpace;
+        String candidate = (line.length() == 0) ? word : (line + " " + word);
+        if (line.length() > 0 && u8f.getUTF8Width(candidate.c_str()) > w) {
+          if (cy >= y && cy <= y + h - lineH) u8f.drawUTF8(x, cy + lineH - 1, line.c_str());
+          cy += lineH;
+          line = word;
+        } else {
+          line = candidate;
+        }
+
+        wordPos = sp + 1;
+        while (wordPos < (int)paragraph.length() && paragraph[wordPos] == ' ') wordPos++;
       }
-      String line = chunk.substring(0, take);
-      line.trim();
-      if (cy >= y && cy <= y + h - 8) tft.drawString(line, x, cy, 1);
-      cy += 9;
-      if (take >= (int)chunk.length()) break;
-      chunk = chunk.substring(take);
-      chunk.trim();
+
+      if (line.length() > 0) {
+        String out = newsEllipsizeUtf8(line, w);
+        if (cy >= y && cy <= y + h - lineH) u8f.drawUTF8(x, cy + lineH - 1, out.c_str());
+        cy += lineH;
+      }
     }
 
-    if (chunk.length() == 0 && (nl >= 0)) cy += 2;
-    if (cy > y + h + 24) break;
+    if (nl >= (int)text.length()) break;
+    pos = nl + 1;
+    if (cy > y + h + 20) break;
   }
 }
 
@@ -2963,10 +2995,11 @@ void drawNewsScreen(bool full) {
 
   if (newsDetailOpen) {
     tft.drawRect(6, 50, 308, 114, TFT_DARKGREY);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    String ttl = newsDetailTitle;
-    if (ttl.length() > 48) ttl = ttl.substring(0, 48);
-    tft.drawString(ttl, 10, 54, 1);
+    u8f.setFont(u8g2_font_6x13_t_cyrillic);
+    u8f.setForegroundColor(TFT_YELLOW);
+    u8f.setBackgroundColor(TFT_BLACK);
+    String ttl = newsEllipsizeUtf8(newsDetailTitle, 300);
+    u8f.drawUTF8(10, 62, ttl.c_str());
 
     int16_t maxScroll = max<int16_t>(0, (int16_t)(newsDetailBody.length() / 30) * 9 - 90);
     if (newsDetailScroll < 0) newsDetailScroll = 0;
@@ -2996,9 +3029,11 @@ void drawNewsScreen(bool full) {
     tft.drawString(line1, 10, y, 1);
 
     String line2 = String(i + 1) + ". " + newsState.items[i].title;
-    if (line2.length() > 52) line2 = line2.substring(0, 52);
-    tft.setTextColor(TFT_WHITE, bg);
-    tft.drawString(line2, 10, y + 10, 1);
+    u8f.setFont(u8g2_font_6x13_t_cyrillic);
+    u8f.setForegroundColor(TFT_WHITE);
+    u8f.setBackgroundColor(bg);
+    line2 = newsEllipsizeUtf8(line2, 300);
+    u8f.drawUTF8(10, y + 20, line2.c_str());
     y += 27;
   }
 
@@ -4019,6 +4054,8 @@ void setup() {
     if (lcd_st7789v[i].len & 0x80) delay(120);
   }
 #endif
+  u8f.begin(tft);
+  u8f.setFontMode(0);
   tft.setRotation(3);
   tft.fillScreen(kColorMenuBg);
   menuSwipeSprite.setColorDepth(16);
@@ -4132,4 +4169,13 @@ void loop() {
     320 != TFT_HEIGHT
 #error "Please select Setup206_LilyGo_T_Display_S3.h in TFT_eSPI/User_Setup_Select.h"
 #endif
+
+
+
+
+
+
+
+
+
 
