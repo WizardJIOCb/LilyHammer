@@ -10,6 +10,7 @@ enum class AppId : uint8_t {
   WiFiManager,
   Bluetooth,
   Web,
+  News,
   Projects,
   Settings,
   ActivityMonitor,
@@ -29,6 +30,7 @@ static constexpr AppDescriptor kAppRegistry[] = {
   {AppId::WiFiManager, "WiFi manager"},
   {AppId::Bluetooth, "Bluetooth"},
   {AppId::Web, "Web"},
+  {AppId::News, "News"},
   {AppId::Projects, "Projects"},
   {AppId::Settings, "Settings"},
   {AppId::ActivityMonitor, "Activity monitor"},
@@ -36,3 +38,4 @@ static constexpr AppDescriptor kAppRegistry[] = {
 };
 
 static constexpr uint8_t kAppRegistryCount = sizeof(kAppRegistry) / sizeof(kAppRegistry[0]);
+

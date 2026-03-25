@@ -1,4 +1,4 @@
-﻿#include "Arduino.h"
+#include "Arduino.h"
 #include "TFT_eSPI.h"
 #include "TouchLib.h"
 #include "Wire.h"
@@ -17,6 +17,7 @@
 #include "apps/AppVersion.h"
 #include "apps/AppRegistry.h"
 #include "apps/AppProjects.h"
+#include "apps/AppNews.h"
 
 #define LCD_MODULE_CMD_1
 
@@ -82,6 +83,7 @@ enum class Screen : uint8_t {
   BluetoothManager,
   WiFiPassword,
   Web,
+  News,
   Projects,
   Settings,
   Activity,
@@ -107,9 +109,12 @@ struct BtDevice;
 Screen currentScreen = Screen::Menu;
 void drawTitle(const char *title, uint16_t bg);
 void drawWebScreen(bool full);
+void drawNewsScreen(bool full);
 void drawProjectsScreen(bool full);
 void fetchProjectsFeed();
+void fetchNewsFeed();
 void projectsScrollBy(int8_t delta);
+void newsScrollBy(int8_t delta);
 void drawBluetoothManagerScreen(bool full);
 bool inRect(int16_t x, int16_t y, int16_t rx, int16_t ry, int16_t rw, int16_t rh);
 String knownPasswordForSsid(const String &ssid);
@@ -353,6 +358,17 @@ bool projectsHydrateActive = false;
 uint8_t projectsHydrateCursor = 0;
 uint8_t projectsHydrateTotal = 0;
 uint8_t projectsHydrateDone = 0;
+
+// News feed
+enum class NewsFilter : uint8_t { All, VC, DTF };
+NewsFeedState newsState;
+NewsFilter newsFilter = NewsFilter::All;
+uint8_t newsListOffset = 0;
+bool newsDetailOpen = false;
+uint8_t newsDetailIndex = 0;
+int16_t newsDetailScroll = 0;
+String newsDetailTitle = "";
+String newsDetailBody = "";
 
 // Settings
 int backlightValue = 255;
@@ -2718,54 +2734,407 @@ void drawWebScreen(bool full) {
   }
 }
 
-String fetchGitHubCommitMessage(const String &repo, const String &sha) {
-  if (repo.length() == 0 || repo == "(unknown repo)") return "";
 
+const char *newsFilterLabel(NewsFilter f) {
+  switch (f) {
+    case NewsFilter::VC: return "VC";
+    case NewsFilter::DTF: return "DTF";
+    default: return "ALL";
+  }
+}
+
+void sortNewsItemsByEpochDesc(NewsItem *items, uint8_t count) {
+  for (uint8_t i = 0; i < count; i++) {
+    for (uint8_t j = i + 1; j < count; j++) {
+      if (items[j].epoch > items[i].epoch) {
+        NewsItem t = items[i];
+        items[i] = items[j];
+        items[j] = t;
+      }
+    }
+  }
+}
+
+int fetchNewsTimelineSource(const char *url, const char *sourceTag, NewsItem *outItems, uint8_t maxItems) {
+  if (!url || !outItems || maxItems == 0) return 0;
   WiFiClientSecure client;
   client.setInsecure();
   HTTPClient http;
-  String url = (sha.length() > 0)
-               ? ("https://api.github.com/repos/" + repo + "/commits/" + sha)
-               : ("https://api.github.com/repos/" + repo + "/commits?per_page=1");
-  addAppTraffic((uint32_t)(url.length() + 180), 0);
-
-  if (!http.begin(client, url)) return "";
-  http.addHeader("User-Agent", "LilyHammer-TDisplayS3");
-  http.setTimeout(3000);
-
-  int code = http.GET();
   String body = "";
+
+  addAppTraffic((uint32_t)(strlen(url) + 180), 0);
+  if (!http.begin(client, String(url))) return -1000;
+  http.addHeader("User-Agent", "LilyHammer-TDisplayS3");
+  http.setTimeout(9000);
+  int code = http.GET();
   if (code == 200) {
     body = http.getString();
     addAppTraffic(0, (uint32_t)body.length());
   }
   http.end();
 
+  if (code != 200) return -2000 - code;
+  return parseNewsTimelineHot(body, sourceTag, outItems, maxItems);
+}
+
+bool fetchNewsDetailContent(uint32_t id, bool isVCRu, String &outTitle, String &outBody, String &outErr) {
+  outTitle = "";
+  outBody = "";
+  outErr = "";
+  if (id == 0) {
+    outErr = "Bad news id";
+    return false;
+  }
+
+  String url = String(isVCRu ? "https://api.vc.ru/v2.8/content?id=" : "https://api.dtf.ru/v2.8/content?id=") + String(id);
+  WiFiClientSecure client;
+  client.setInsecure();
+  HTTPClient http;
+
+  addAppTraffic((uint32_t)(url.length() + 180), 0);
+  if (!http.begin(client, url)) {
+    outErr = "News detail begin failed";
+    return false;
+  }
+  http.addHeader("User-Agent", "LilyHammer-TDisplayS3");
+  http.setTimeout(10000);
+  int code = http.GET();
+  if (code != 200) {
+    outErr = "News detail HTTP " + String(code);
+    http.end();
+    return false;
+  }
+
+  String body = http.getString();
+  addAppTraffic(0, (uint32_t)body.length());
+  http.end();
+
+  outBody = parseNewsContentText(body, outTitle);
+  if (outTitle.length() == 0) outTitle = "News";
+  return true;
+}
+
+void fetchNewsFeed() {
+  newsState.loading = true;
+  newsState.loadingDots = 0;
+  newsState.status = "Loading news...";
+  newsDetailOpen = false;
+  newsListOffset = 0;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    newsState.loading = false;
+    newsState.status = "News: no WiFi";
+    return;
+  }
+
+  NewsItem vcItems[kNewsItemMax] = {};
+  NewsItem dtfItems[kNewsItemMax] = {};
+  int vcCount = 0;
+  int dtfCount = 0;
+
+  if (newsFilter == NewsFilter::All || newsFilter == NewsFilter::VC) {
+    vcCount = fetchNewsTimelineSource("https://api.vc.ru/v2.8/timeline?sorting=hotness", "vc.ru", vcItems, kNewsItemMax);
+  }
+  if (newsFilter == NewsFilter::All || newsFilter == NewsFilter::DTF) {
+    dtfCount = fetchNewsTimelineSource("https://api.dtf.ru/v2.8/timeline?sorting=hotness", "dtf.ru", dtfItems, kNewsItemMax);
+  }
+
+  newsState.count = 0;
+
+  if (vcCount > 0) {
+    for (int i = 0; i < vcCount && newsState.count < kNewsItemMax; i++) {
+      newsState.items[newsState.count++] = vcItems[i];
+    }
+  }
+  if (dtfCount > 0) {
+    for (int i = 0; i < dtfCount && newsState.count < kNewsItemMax; i++) {
+      newsState.items[newsState.count++] = dtfItems[i];
+    }
+  }
+
+  if (newsState.count > 1) sortNewsItemsByEpochDesc(newsState.items, newsState.count);
+
+  newsState.loading = false;
+  newsState.lastFetchMs = millis();
+
+  if (newsState.count == 0) {
+    int errCode = 0;
+    if (vcCount < 0) errCode = vcCount;
+    else if (dtfCount < 0) errCode = dtfCount;
+    if (errCode <= -2000) {
+      int httpCode = -errCode - 2000;
+      newsState.status = "News HTTP " + String(httpCode);
+    } else {
+      newsState.status = "No news loaded";
+    }
+  } else {
+    newsState.status = "Loaded " + String(newsState.count) + " hot posts (" + String(newsFilterLabel(newsFilter)) + ")";
+  }
+
+  Serial.printf("[News] filter=%s vc=%d dtf=%d total=%u\n", newsFilterLabel(newsFilter), vcCount, dtfCount, (unsigned)newsState.count);
+}
+
+void newsScrollBy(int8_t delta) {
+  const uint8_t visible = 4;
+  if (newsState.count <= visible) {
+    newsListOffset = 0;
+    return;
+  }
+  int16_t maxOff = (int16_t)newsState.count - visible;
+  int16_t next = (int16_t)newsListOffset + delta;
+  if (next < 0) next = 0;
+  if (next > maxOff) next = maxOff;
+  if ((uint8_t)next != newsListOffset) {
+    newsListOffset = (uint8_t)next;
+    needFullRedraw = true;
+  }
+}
+
+void drawNewsWrappedText(const String &text, int16_t x, int16_t y, int16_t w, int16_t h, int16_t yOffset, uint16_t color) {
+  const uint8_t charsPerLine = max<int16_t>(18, w / 6);
+  int16_t cy = y - yOffset;
+  int idx = 0;
+  tft.setTextColor(color, TFT_BLACK);
+
+  while (idx < (int)text.length()) {
+    int nl = text.indexOf('\n', idx);
+    String chunk;
+    if (nl < 0) {
+      chunk = text.substring(idx);
+      idx = text.length();
+    } else {
+      chunk = text.substring(idx, nl);
+      idx = nl + 1;
+    }
+
+    while (chunk.length() > 0) {
+      int take = min((int)charsPerLine, (int)chunk.length());
+      if (take < (int)chunk.length()) {
+        int lastSpace = chunk.lastIndexOf(' ', take - 1);
+        if (lastSpace > charsPerLine / 2) take = lastSpace;
+      }
+      String line = chunk.substring(0, take);
+      line.trim();
+      if (cy >= y && cy <= y + h - 8) tft.drawString(line, x, cy, 1);
+      cy += 9;
+      if (take >= (int)chunk.length()) break;
+      chunk = chunk.substring(take);
+      chunk.trim();
+    }
+
+    if (chunk.length() == 0 && (nl >= 0)) cy += 2;
+    if (cy > y + h + 24) break;
+  }
+}
+
+void drawNewsScreen(bool full) {
+  if (full) {
+    if (tft.getRotation() != 3) tft.setRotation(3);
+    tft.fillScreen(kColorMenuBg);
+    drawTitle("News");
+  }
+
+  tft.fillRect(4, 4, 312, 162, TFT_BLACK);
+
+  uint16_t allBg = (newsFilter == NewsFilter::All) ? TFT_DARKCYAN : TFT_DARKGREY;
+  uint16_t vcBg = (newsFilter == NewsFilter::VC) ? TFT_DARKGREEN : TFT_DARKGREY;
+  uint16_t dtfBg = (newsFilter == NewsFilter::DTF) ? tft.color565(90, 90, 0) : TFT_DARKGREY;
+  uint16_t rfBg = newsState.loading ? TFT_DARKGREY : tft.color565(20, 80, 120);
+
+  tft.fillRoundRect(10, 10, 56, 22, 5, allBg);
+  tft.fillRoundRect(70, 10, 56, 22, 5, vcBg);
+  tft.fillRoundRect(130, 10, 56, 22, 5, dtfBg);
+  tft.fillRoundRect(190, 10, 120, 22, 5, rfBg);
+
+  tft.setTextColor(TFT_WHITE, allBg);
+  tft.drawCentreString("ALL", 38, 15, 2);
+  tft.setTextColor(TFT_WHITE, vcBg);
+  tft.drawCentreString("VC", 98, 15, 2);
+  tft.setTextColor(TFT_WHITE, dtfBg);
+  tft.drawCentreString("DTF", 158, 15, 2);
+  tft.setTextColor(TFT_WHITE, rfBg);
+  String rf = newsState.loading ? makeLoadingLabel(newsState.loadingDots) : String("REFRESH");
+  tft.drawCentreString(rf, 250, 15, 2);
+
+  tft.setTextColor(TFT_CYAN, TFT_BLACK);
+  String st = newsState.status;
+  if (st.length() > 50) st = st.substring(0, 50);
+  tft.drawString(st, 8, 38, 1);
+
+  if (newsDetailOpen) {
+    tft.drawRect(6, 50, 308, 114, TFT_DARKGREY);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    String ttl = newsDetailTitle;
+    if (ttl.length() > 48) ttl = ttl.substring(0, 48);
+    tft.drawString(ttl, 10, 54, 1);
+
+    int16_t maxScroll = max<int16_t>(0, (int16_t)(newsDetailBody.length() / 30) * 9 - 90);
+    if (newsDetailScroll < 0) newsDetailScroll = 0;
+    if (newsDetailScroll > maxScroll) newsDetailScroll = maxScroll;
+
+    drawNewsWrappedText(newsDetailBody, 10, 66, 300, 92, newsDetailScroll, TFT_WHITE);
+
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("Swipe up/down text, tap to close", 10, 154, 1);
+    return;
+  }
+
+  const uint8_t visible = 4;
+  uint8_t start = (newsState.count > visible) ? newsListOffset : 0;
+
+  int16_t y = 52;
+  for (uint8_t row = 0; row < visible; row++) {
+    uint8_t i = start + row;
+    if (i >= newsState.count) break;
+
+    uint16_t bg = (row % 2 == 0) ? TFT_BLACK : tft.color565(8, 10, 14);
+    tft.fillRect(8, y - 2, 304, 25, bg);
+
+    String line1 = "[" + newsState.items[i].source + "] " + newsState.items[i].date + " " + newsState.items[i].time + "  L" + String(newsState.items[i].likes);
+    if (line1.length() > 50) line1 = line1.substring(0, 50);
+    tft.setTextColor(TFT_CYAN, bg);
+    tft.drawString(line1, 10, y, 1);
+
+    String line2 = String(i + 1) + ". " + newsState.items[i].title;
+    if (line2.length() > 52) line2 = line2.substring(0, 52);
+    tft.setTextColor(TFT_WHITE, bg);
+    tft.drawString(line2, 10, y + 10, 1);
+    y += 27;
+  }
+
+  if (newsState.count == 0) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("Tap REFRESH to load hot posts", 10, 74, 1);
+  } else if (newsState.count > visible) {
+    tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
+    tft.drawString("Swipe list up/down", 210, 154, 1);
+  }
+}
+
+void openNewsDetail(uint8_t itemIndex) {
+  if (itemIndex >= newsState.count) return;
+
+  newsDetailTitle = "Loading...";
+  newsDetailBody = "";
+  newsDetailScroll = 0;
+  newsDetailOpen = true;
+  needFullRedraw = true;
+  drawNewsScreen(false);
+
+  bool isVC = (newsState.items[itemIndex].source == "vc.ru");
+  String err;
+  if (fetchNewsDetailContent(newsState.items[itemIndex].id, isVC, newsDetailTitle, newsDetailBody, err)) {
+    newsDetailIndex = itemIndex;
+  } else {
+    newsDetailTitle = newsState.items[itemIndex].title;
+    newsDetailBody = err.length() > 0 ? err : String("No detail");
+  }
+
+  needFullRedraw = true;
+}
+
+void handleNewsTap(int16_t x, int16_t y) {
+  if (newsDetailOpen) {
+    newsDetailOpen = false;
+    newsDetailScroll = 0;
+    needFullRedraw = true;
+    return;
+  }
+
+  if (inRect(x, y, 10, 10, 56, 22)) {
+    newsFilter = NewsFilter::All;
+    fetchNewsFeed();
+    needFullRedraw = true;
+    return;
+  }
+  if (inRect(x, y, 70, 10, 56, 22)) {
+    newsFilter = NewsFilter::VC;
+    fetchNewsFeed();
+    needFullRedraw = true;
+    return;
+  }
+  if (inRect(x, y, 130, 10, 56, 22)) {
+    newsFilter = NewsFilter::DTF;
+    fetchNewsFeed();
+    needFullRedraw = true;
+    return;
+  }
+  if (inRect(x, y, 190, 10, 120, 22)) {
+    if (!newsState.loading) {
+      fetchNewsFeed();
+      needFullRedraw = true;
+    }
+    return;
+  }
+
+  const uint8_t visible = 4;
+  uint8_t start = (newsState.count > visible) ? newsListOffset : 0;
+  for (uint8_t row = 0; row < visible; row++) {
+    uint8_t idx = start + row;
+    if (idx >= newsState.count) break;
+    int16_t ry = 50 + row * 27;
+    if (inRect(x, y, 8, ry, 304, 25)) {
+      openNewsDetail(idx);
+      return;
+    }
+  }
+}
+String fetchGitHubCommitMessage(const String &repo, const String &sha) {
+  if (repo.length() == 0 || repo == "(unknown repo)") return "";
+
+  String token = String(GITHUB_TOKEN);
+  auto doRequest = [&](bool useAuth, bool bearerAuth, String &outBody) -> int {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    String url = (sha.length() > 0)
+                 ? ("https://api.github.com/repos/" + repo + "/commits/" + sha)
+                 : ("https://api.github.com/repos/" + repo + "/commits?per_page=1");
+    addAppTraffic((uint32_t)(url.length() + 180), 0);
+
+    if (!http.begin(client, url)) return -1000;
+    http.addHeader("User-Agent", "LilyHammer-TDisplayS3");
+    if (useAuth && token.length() > 0) {
+      http.addHeader("Authorization", (bearerAuth ? String("Bearer ") : String("token ")) + token);
+    }
+    http.setTimeout(3000);
+
+    int code = http.GET();
+    if (code == 200) {
+      outBody = http.getString();
+      addAppTraffic(0, (uint32_t)outBody.length());
+    }
+    http.end();
+    return code;
+  };
+
+  String body = "";
+  int code = -1;
+  if (token.length() > 0) {
+    code = doRequest(true, false, body);
+    if (code == 401) code = doRequest(true, true, body);
+  } else {
+    code = doRequest(false, false, body);
+  }
+
   if (code != 200 || body.length() == 0) {
-    Serial.printf("[Projects] commit lookup failed repo=%s sha=%s code=%d\n", repo.c_str(), sha.c_str(), code);
+    Serial.printf("[Projects] commit lookup failed repo=%s sha=%s code=%d token_len=%u\n",
+                  repo.c_str(), sha.c_str(), code, (unsigned)token.length());
     return "";
   }
 
   int msgPos = body.indexOf("\"message\":");
   if (msgPos < 0) return "";
-
   int q0 = body.indexOf('"', msgPos + 10);
   if (q0 < 0) return "";
+
   int i = q0 + 1;
   bool esc = false;
   String out = "";
   for (; i < (int)body.length(); i++) {
     char ch = body[i];
-    if (esc) {
-      out += ch;
-      esc = false;
-      continue;
-    }
-    if (ch == '\\') {
-      out += ch;
-      esc = true;
-      continue;
-    }
+    if (esc) { out += ch; esc = false; continue; }
+    if (ch == '\\') { out += ch; esc = true; continue; }
     if (ch == '"') break;
     out += ch;
   }
@@ -2839,35 +3208,45 @@ void fetchProjectsFeed() {
     return;
   }
 
+  String token = String(GITHUB_TOKEN);
   String body = "";
-  int code = -1;
-  {
+  auto doRequest = [&](bool useAuth, bool bearerAuth) -> int {
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
     String url = "https://api.github.com/users/" + String(GITHUB_USERNAME) + "/events/public?per_page=50";
     addAppTraffic((uint32_t)(url.length() + 180), 0);
 
-    if (!http.begin(client, url)) {
-      projectsState.loading = false;
-      projectsState.status = "Projects: begin failed";
-      return;
-    }
-
+    if (!http.begin(client, url)) return -1000;
     http.addHeader("User-Agent", "LilyHammer-TDisplayS3");
+    if (useAuth && token.length() > 0) {
+      http.addHeader("Authorization", (bearerAuth ? String("Bearer ") : String("token ")) + token);
+    }
     http.setTimeout(8000);
 
-    code = http.GET();
+    int code = http.GET();
     if (code == 200) {
       body = http.getString();
       addAppTraffic(0, (uint32_t)body.length());
     }
     http.end();
+    return code;
+  };
+
+  int code = -1;
+  if (token.length() > 0) {
+    code = doRequest(true, false);
+    if (code == 401) code = doRequest(true, true);
+  } else {
+    code = doRequest(false, false);
   }
 
+  Serial.printf("[Projects] feed code=%d token_len=%u\n", code, (unsigned)token.length());
   if (code != 200) {
     projectsState.loading = false;
-    projectsState.status = "Projects HTTP " + String(code);
+    if (code == 401) projectsState.status = "Projects HTTP 401 (bad token)";
+    else if (code == 403) projectsState.status = "Projects HTTP 403 (rate/scope)";
+    else projectsState.status = "Projects HTTP " + String(code);
     return;
   }
 
@@ -2883,7 +3262,6 @@ void fetchProjectsFeed() {
                   projectsState.items[0].message.c_str());
   }
   projectsState.lastFetchMs = millis();
-
   beginProjectsHydration();
 }
 void projectsScrollBy(int8_t delta) {
@@ -3049,6 +3427,7 @@ void drawCurrentScreen(bool full) {
     case Screen::BluetoothManager: drawBluetoothManagerScreen(full); break;
     case Screen::WiFiPassword: drawWiFiPasswordScreen(full); break;
     case Screen::Web: drawWebScreen(full); break;
+    case Screen::News: drawNewsScreen(full); break;
     case Screen::Projects: drawProjectsScreen(full); break;
     case Screen::Settings: drawSettingsScreen(full); break;
     case Screen::Activity: drawActivityScreen(full); break;
@@ -3081,6 +3460,7 @@ void openSelectedMenu() {
     case AppId::WiFiManager: currentScreen = Screen::WiFiManager; break;
     case AppId::Bluetooth: currentScreen = Screen::BluetoothManager; break;
     case AppId::Web: currentScreen = Screen::Web; break;
+    case AppId::News: currentScreen = Screen::News; break;
     case AppId::Projects: currentScreen = Screen::Projects; break;
     case AppId::Settings: currentScreen = Screen::Settings; break;
     case AppId::ActivityMonitor: currentScreen = Screen::Activity; break;
@@ -3090,6 +3470,9 @@ void openSelectedMenu() {
 
   if (currentScreen == Screen::Projects && projectsState.count == 0 && !projectsState.loading) {
     fetchProjectsFeed();
+  }
+  if (currentScreen == Screen::News && newsState.count == 0 && !newsState.loading) {
+    fetchNewsFeed();
   }
 
   needFullRedraw = true;
@@ -3364,6 +3747,10 @@ void onTap(int16_t x, int16_t y) {
     }
     return;
   }
+  if (currentScreen == Screen::News) {
+    handleNewsTap(x, y);
+    return;
+  }
   if (currentScreen == Screen::Projects) {
     handleProjectsTap(x, y);
     return;
@@ -3563,8 +3950,13 @@ void processTouch() {
   bool verticalProjectsSwipe = (currentScreen == Screen::Projects) &&
                                (abs(dy) >= 14) && (abs(dy) > abs(dx)) &&
                                (touchState.startY >= 52);
+  bool verticalNewsSwipe = (currentScreen == Screen::News) &&
+                           (abs(dy) >= 14) && (abs(dy) > abs(dx)) &&
+                           (touchState.startY >= 50);
   bool horizontalProjectsBack = (currentScreen == Screen::Projects) &&
                                 (dx > 0) && (abs(dx) >= 95) && (abs(dx) > (abs(dy) * 2));
+  bool horizontalNewsBack = (currentScreen == Screen::News) &&
+                            (dx > 0) && (abs(dx) >= 110) && (abs(dx) > (abs(dy) * 2));
   bool isTap = abs(dx) < kTapMoveThreshold && abs(dy) < kTapMoveThreshold && dt <= kTapTimeMs;
 
   if (verticalWiFiSwipe) {
@@ -3573,9 +3965,17 @@ void processTouch() {
   } else if (verticalProjectsSwipe) {
     if (dy < 0) projectsScrollBy(1);
     else projectsScrollBy(-1);
-  } else if (horizontalProjectsBack) {
+  } else if (verticalNewsSwipe) {
+    if (newsDetailOpen) {
+      newsDetailScroll += (dy < 0) ? 16 : -16;
+      needFullRedraw = true;
+    } else {
+      if (dy < 0) newsScrollBy(1);
+      else newsScrollBy(-1);
+    }
+  } else if (horizontalProjectsBack || horizontalNewsBack) {
     onSwipeRight();
-  } else if (horizontalSwipe && currentScreen != Screen::Projects) {
+  } else if (horizontalSwipe && currentScreen != Screen::Projects && currentScreen != Screen::News) {
     if (dx > 0) onSwipeRight();
     else onSwipeLeft();
   } else if (isTap) {
@@ -3732,263 +4132,4 @@ void loop() {
     320 != TFT_HEIGHT
 #error "Please select Setup206_LilyGo_T_Display_S3.h in TFT_eSPI/User_Setup_Select.h"
 #endif
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

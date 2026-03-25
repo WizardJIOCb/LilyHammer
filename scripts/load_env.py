@@ -1,4 +1,4 @@
-﻿import os
+import os
 from pathlib import Path
 
 Import("env")
@@ -15,7 +15,7 @@ def _parse_dotenv(path: Path):
         if "=" not in line:
             continue
         key, value = line.split("=", 1)
-        key = key.strip()
+        key = key.strip().lstrip("\ufeff")
         value = value.strip()
         if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
             value = value[1:-1]
@@ -37,6 +37,7 @@ if not token:
     token = dotenv.get("GITHUB_TOKEN", "")
 
 if token:
-    env.Append(CPPDEFINES=[("GITHUB_TOKEN", '\"{}\"'.format(_escape_cpp_string(token)))])
+    env.Append(CPPDEFINES=[("GITHUB_TOKEN", '\\\"{}\\\"'.format(_escape_cpp_string(token)))])
 else:
-    env.Append(CPPDEFINES=[("GITHUB_TOKEN", '\"\"')])
+    env.Append(CPPDEFINES=[("GITHUB_TOKEN", '\\\"\\\"')])
+
